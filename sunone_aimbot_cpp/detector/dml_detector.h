@@ -1,0 +1,65 @@
+#ifndef DIRECTML_DETECTOR_H
+#define DIRECTML_DETECTOR_H
+
+#include <onnxruntime_cxx_api.h>
+#include <opencv2/opencv.hpp>
+#include <mutex>
+#include <memory>
+
+#include "postProcess.h"
+
+// Forward declaration
+class D3D11StagingManager;
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
+
+class DirectMLDetector
+{
+public:
+    DirectMLDetector(const std::string& model_path);
+    ~DirectMLDetector();
+
+    std::vector<Detection> detect(const cv::Mat& input_frame);
+    std::vector<std::vector<Detection>> detectBatch(const std::vector<cv::Mat>& frames);
+
+    void dmlInferenceThread();
+    void processFrame(const cv::Mat& frame);
+    
+    // GPU texture processing for zero-copy optimization
+    bool initializeStagingManager(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height);
+    void processFrameFromGpu(ID3D11Texture2D* texture);
+
+    int getNumberOfClasses();
+
+    std::chrono::duration<double, std::milli> lastInferenceTimeDML;
+    std::chrono::duration<double, std::milli> lastPreprocessTimeDML;
+    std::chrono::duration<double, std::milli> lastCopyTimeDML;
+    std::chrono::duration<double, std::milli> lastPostprocessTimeDML;
+    std::chrono::duration<double, std::milli> lastNmsTimeDML;
+
+    std::condition_variable inferenceCV;
+    std::atomic<bool> shouldExit = false;
+
+private:
+    Ort::Env env;
+    Ort::Session session{ nullptr };
+    Ort::SessionOptions session_options;
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    std::string input_name;
+    std::string output_name;
+    std::vector<int64_t> input_shape;
+
+    std::mutex inferenceMutex;
+    cv::Mat currentFrame;
+    bool frameReady = false;
+
+    void initializeModel(const std::string& model_path);
+    Ort::MemoryInfo memory_info;
+    
+    // D3D11 staging manager for GPU texture transfer
+    std::unique_ptr<D3D11StagingManager> stagingManager;
+};
+
+#endif // DIRECTML_DETECTOR_H

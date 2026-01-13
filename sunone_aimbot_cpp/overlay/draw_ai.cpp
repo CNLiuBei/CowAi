@@ -1,0 +1,135 @@
+﻿#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#include <winsock2.h>
+#include <Windows.h>
+
+#include "imgui/imgui.h"
+
+#include "sunone_aimbot_cpp.h"
+#include "include/other_tools.h"
+#include "overlay.h"
+#ifdef USE_CUDA
+#include "trt_monitor.h"
+#endif
+
+std::string prev_backend = config.backend;
+float prev_confidence_threshold = config.confidence_threshold;
+float prev_nms_threshold = config.nms_threshold;
+int prev_max_detections = config.max_detections;
+
+static bool wasExporting = false;
+
+void draw_ai()
+{
+#ifdef USE_CUDA
+    if (gIsTrtExporting)
+    {
+        ImGui::OpenPopup("TensorRT Export Progress");
+    }
+
+    if (ImGui::BeginPopupModal("TensorRT 导出进度", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        std::lock_guard<std::mutex> lock(gProgressMutex);
+        if (!gProgressPhases.empty())
+        {
+            for (auto& [name, phase] : gProgressPhases)
+            {
+                float percent = phase.max > 0 ? phase.current / float(phase.max) : 0.0f;
+                ImGui::Text("%s: %d/%d", name.c_str(), phase.current, phase.max);
+                ImGui::ProgressBar(percent, ImVec2(300, 0));
+            }
+        }
+        else
+        {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::Text("引擎导出中，请稍候...");
+        ImGui::EndPopup();
+    }
+#endif
+    std::vector<std::string> availableModels = getAvailableModels(false);
+    if (availableModels.empty())
+    {
+        ImGui::Text("'models' 文件夹中没有可用模型。");
+    }
+    else
+    {
+        int currentModelIndex = 0;
+        auto it = std::find(availableModels.begin(), availableModels.end(), config.ai_model);
+
+        if (it != availableModels.end())
+        {
+            currentModelIndex = static_cast<int>(std::distance(availableModels.begin(), it));
+        }
+
+        std::vector<const char*> modelsItems;
+        modelsItems.reserve(availableModels.size());
+
+        for (const auto& modelName : availableModels)
+        {
+            modelsItems.push_back(modelName.c_str());
+        }
+
+        if (ImGui::Combo(u8"模型", &currentModelIndex, modelsItems.data(), static_cast<int>(modelsItems.size())))
+        {
+            if (config.ai_model != availableModels[currentModelIndex])
+            {
+                config.ai_model = availableModels[currentModelIndex];
+                config.saveConfig();
+                detector_model_changed.store(true);
+            }
+        }
+    }
+
+    ImGui::Separator();
+
+#ifdef USE_CUDA
+    std::vector<std::string> backendOptions = { "TRT", "DML" };
+    std::vector<const char*> backendItems = { "TensorRT (CUDA)", "DirectML (CPU/GPU)" };
+
+    int currentBackendIndex = config.backend == "DML" ? 1 : 0;
+
+    if (ImGui::Combo(u8"后端", &currentBackendIndex, backendItems.data(), static_cast<int>(backendItems.size())))
+    {
+        std::string newBackend = backendOptions[currentBackendIndex];
+        if (config.backend != newBackend)
+        {
+            config.backend = newBackend;
+            config.saveConfig();
+            detector_model_changed.store(true);
+        }
+    }
+
+    ImGui::Separator();
+#endif
+
+    ImGui::Separator();
+    ImGui::SliderFloat(u8"置信度阈值", &config.confidence_threshold, 0.01f, 1.00f, "%.2f");
+    ImGui::SliderFloat(u8"NMS 阈值", &config.nms_threshold, 0.00f, 1.00f, "%.2f");
+    ImGui::SliderInt(u8"最大检测数", &config.max_detections, 1, 100);
+
+    if (ImGui::Checkbox(u8"固定模型尺寸", &config.fixed_input_size))
+    {
+        capture_method_changed.store(true);
+        config.saveConfig();
+        detector_model_changed.store(true);
+    }
+        
+    if (prev_confidence_threshold != config.confidence_threshold ||
+        prev_nms_threshold != config.nms_threshold ||
+        prev_max_detections != config.max_detections)
+    {
+        prev_nms_threshold = config.nms_threshold;
+        prev_confidence_threshold = config.confidence_threshold;
+        prev_max_detections = config.max_detections;
+        config.saveConfig();
+    }
+
+    if (prev_backend != config.backend)
+    {
+        prev_backend = config.backend;
+        detector_model_changed.store(true);
+        config.saveConfig();
+    }
+}

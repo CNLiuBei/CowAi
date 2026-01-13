@@ -1,0 +1,36 @@
+# TGAuth Cloudflare Worker 配置
+name = "tgauth-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# 静态资源目录
+[assets]
+directory = "./admin-panel/dist"
+binding = "ASSETS"
+html_handling = "auto-trailing-slash"
+not_found_handling = "single-page-application"
+
+# 定时任务 - 每天凌晨 3 点清理过期数据
+[triggers]
+crons = ["0 3 * * *"]
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "tgauth-db"
+database_id = "c61dca38-d5fb-45e9-9158-178deb70cf19"
+
+# KV 命名空间绑定
+[[kv_namespaces]]
+binding = "KV"
+id = "d10113e162b347bfb3f71916a91835f5"
+
+# 环境变量 (敏感信息应使用 secrets)
+[vars]
+BOT_USERNAME = "cowyanzhengbot"
+SESSION_TIMEOUT_SEC = "300"
+TOKEN_EXPIRE_DAYS = "7"
+DEFAULT_DEVICE_LIMIT = "1"
+RATE_LIMIT_REQUESTS = "60"
+RATE_LIMIT_WINDOW_SEC = "60"
+ALIPAY_NOTIFY_URL = "https://zfbhd.liubei.org"

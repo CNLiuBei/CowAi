@@ -1,0 +1,16 @@
+# 支付宝回调中转 Worker
+name = "alipay-notify"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# 自定义域名
+routes = [
+  { pattern = "zfbhd.liubei.org", custom_domain = true }
+]
+
+[vars]
+# 路由配置：订单号前缀 -> 目标回调地址
+# ORD 前缀的订单转发到 cowai
+ROUTE_ORD = "https://cowai.trueliu.com/api/pay/notify"
+# 其他前缀可以继续添加，例如：
+# ROUTE_HUB = "https://hubsd.trueliu.com/api/v1/payment/alipay/notify"
