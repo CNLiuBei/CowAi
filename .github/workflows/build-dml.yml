@@ -69,7 +69,21 @@ jobs:
         run: nuget restore "${{ env.SOLUTION_FILE }}"
 
       - name: Build serial (Release|x64)
-        run: msbuild "${{ env.SERIAL_PROJECT }}" /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m /v:minimal
+        shell: pwsh
+        run: |
+          # Main vcxproj expects serial.lib at:
+          #   sunone_aimbot_cpp\modules\serial\visual_studio\x64\Release\serial.lib
+          # so force OutDir to that location.
+          $outDir = "$env:GITHUB_WORKSPACE\sunone_aimbot_cpp\modules\serial\visual_studio\x64\Release\"
+          msbuild "${{ env.SERIAL_PROJECT }}" `
+            /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 `
+            /p:OutDir="$outDir" /p:IntDir="$outDir\obj\" `
+            /m /v:minimal
+          if (-not (Test-Path "$outDir\serial.lib")) {
+            Write-Error "serial.lib not produced at expected path"
+            Get-ChildItem -Recurse -Filter serial.lib "$env:GITHUB_WORKSPACE\sunone_aimbot_cpp\modules\serial"
+            exit 1
+          }
 
       - name: Build solution (DML|x64)
         env:
