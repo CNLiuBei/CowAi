@@ -1,0 +1,73 @@
+# Build outputs
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.exp
+*.ilk
+*.iobj
+*.ipdb
+
+# Vendored prebuilt libraries that MUST be tracked for CI builds
+!sunone_aimbot_cpp/modules/**/*.dll
+!sunone_aimbot_cpp/modules/**/*.lib
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+x64/
+packages/
+
+# Project specific
+sunone_aimbot_cpp/x64/
+sunone_aimbot_cpp/modules/serial/visual_studio/x64/
+sunone_aimbot_cpp/modules/serial/visual_studio/Debug/
+sunone_aimbot_cpp/modules/serial/visual_studio/Release/
+sunone_aimbot_cpp/imgui.ini
+
+# Models (large files)
+models/
+*.engine
+*.onnx
+
+# Config and auth
+config.ini
+auth_token.dat
+
+# Screenshots and datasets
+screenshots/
+dataset/
+
+# Dependencies
+opencv/
+node_modules/
+
+# Cloudflare Workers
+tgauth-worker/.wrangler/
+tgauth-worker/node_modules/
+tgauth-worker/admin-panel/node_modules/
+tgauth-worker/admin-panel/dist/
+tgauth-worker/admin-panel/.wrangler/
+alipay-notify-worker/.wrangler/
+alipay-notify-worker/node_modules/
+
+# Temp files
+*.zip
+*.rar
+*.7z
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kiro
+.kiro/
+.shared/

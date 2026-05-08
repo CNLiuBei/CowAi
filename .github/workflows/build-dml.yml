@@ -1,0 +1,127 @@
+name: Build DML
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  SOLUTION_FILE: sunone_aimbot_cpp.sln
+  SERIAL_PROJECT: sunone_aimbot_cpp/modules/serial/visual_studio/serial/serial.vcxproj
+  CONFIGURATION: DML
+  PLATFORM: x64
+  OPENCV_VERSION: 4.13.0
+
+jobs:
+  build:
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Cache OpenCV
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: C:\opencv
+          key: opencv-${{ env.OPENCV_VERSION }}-windows-v1
+
+      - name: Download and extract OpenCV
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ver = "${{ env.OPENCV_VERSION }}"
+          $url = "https://github.com/opencv/opencv/releases/download/$ver/opencv-$ver-windows.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\opencv.exe" -UseBasicParsing
+          Write-Host "Extracting..."
+          Start-Process -FilePath "$env:RUNNER_TEMP\opencv.exe" -ArgumentList "-o`"C:\opencv-extract`"","-y" -Wait
+          # The extracted folder layout is C:\opencv-extract\opencv\build\...
+          New-Item -ItemType Directory -Force -Path C:\opencv | Out-Null
+          Copy-Item -Recurse -Force "C:\opencv-extract\opencv\build\*" "C:\opencv\"
+          Get-ChildItem C:\opencv
+
+      - name: Verify OpenCV layout
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\opencv\include\opencv2")) {
+            Write-Error "OpenCV include not found at C:\opencv\include\opencv2"
+            Get-ChildItem -Recurse -Depth 2 C:\opencv | Select-Object -First 50
+            exit 1
+          }
+          if (-not (Test-Path "C:\opencv\x64\vc16\lib")) {
+            Write-Error "OpenCV vc16 libs not found at C:\opencv\x64\vc16\lib"
+            Get-ChildItem -Recurse -Depth 3 C:\opencv | Select-Object -First 100
+            exit 1
+          }
+          Write-Host "OpenCV OK"
+
+      - name: NuGet restore
+        run: nuget restore "${{ env.SOLUTION_FILE }}"
+
+      - name: Build serial (Release|x64)
+        run: msbuild "${{ env.SERIAL_PROJECT }}" /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m /v:minimal
+
+      - name: Build solution (DML|x64)
+        env:
+          OPENCV_DIR: C:\opencv
+        run: msbuild "${{ env.SOLUTION_FILE }}" /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=${{ env.PLATFORM }} /p:PlatformToolset=v143 /m /v:minimal
+
+      - name: Stage runtime artifacts
+        shell: pwsh
+        run: |
+          $stage = "$env:GITHUB_WORKSPACE\artifact"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # Locate built ai.exe (TargetName=ai)
+          $exe = Get-ChildItem -Recurse -Filter ai.exe `
+                   -Path "$env:GITHUB_WORKSPACE" | Select-Object -First 1
+          if (-not $exe) { Write-Error "ai.exe not found"; exit 1 }
+          Write-Host "Found exe: $($exe.FullName)"
+          Copy-Item $exe.FullName $stage
+
+          # Required runtime DLLs - copy any opencv_world*.dll and ffmpeg DLL we find
+          Get-ChildItem -Path "C:\opencv\x64\vc16\bin" -Filter "opencv_world*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $stage -Force; Write-Host "Copied $($_.Name)" }
+          Get-ChildItem -Path "C:\opencv\x64\vc16\bin" -Filter "opencv_videoio_ffmpeg*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $stage -Force; Write-Host "Copied $($_.Name)" }
+
+          $glfw = "$env:GITHUB_WORKSPACE\sunone_aimbot_cpp\modules\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll"
+          if (Test-Path $glfw) { Copy-Item $glfw $stage -Force; Write-Host "Copied glfw3.dll" }
+
+          # NuGet-provided DLLs (DirectML, ONNX Runtime, libcurl)
+          Get-ChildItem -Recurse -Path "$env:GITHUB_WORKSPACE\packages" `
+            -Include "DirectML.dll","onnxruntime.dll","DirectML.Debug.dll","libcurl.dll" `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "x64|win-x64" } |
+            ForEach-Object {
+              Copy-Item $_.FullName $stage -Force
+              Write-Host "Copied NuGet DLL: $($_.FullName)"
+            }
+
+          # Bundle config and assets if present in the build output dir
+          foreach ($name in @("config.ini","models","fonts","assets")) {
+            $src = Join-Path $env:GITHUB_WORKSPACE $name
+            if (Test-Path $src) {
+              Copy-Item -Recurse -Force $src $stage
+              Write-Host "Bundled $src"
+            }
+          }
+
+          Get-ChildItem $stage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CowAi-DML-x64
+          path: artifact/**
+          if-no-files-found: error

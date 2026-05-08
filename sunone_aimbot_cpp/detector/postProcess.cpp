@@ -1,0 +1,289 @@
+#include <algorithm>
+#include <numeric>
+#include <chrono>
+
+#include "postProcess.h"
+#include "sunone_aimbot_cpp.h"
+#ifdef USE_CUDA
+#include "trt_detector.h"
+#else
+#include "dml_detector.h"
+#endif
+
+void NMS(std::vector<Detection>& detections, float nmsThreshold, std::chrono::duration<double, std::milli>* nmsTime)
+{
+    if (detections.empty()) return;
+
+    if (nmsThreshold <= 0.0f)
+    {
+        if (nmsTime)
+        {
+            *nmsTime = std::chrono::duration<double, std::milli>(0);
+        }
+        return;
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    std::sort(
+        detections.begin(),
+        detections.end(),
+        [](const Detection& a, const Detection& b)
+        {
+            return a.confidence > b.confidence;
+        }
+    );
+
+    std::vector<bool> suppress(detections.size(), false);
+    std::vector<Detection> result;
+    result.reserve(detections.size());
+
+    for (size_t i = 0; i < detections.size(); ++i)
+    {
+        if (suppress[i]) continue;
+
+        result.push_back(detections[i]);
+
+        const cv::Rect& box_i = detections[i].box;
+        const float area_i = static_cast<float>(box_i.area());
+
+        for (size_t j = i + 1; j < detections.size(); ++j)
+        {
+            if (suppress[j]) continue;
+
+            const cv::Rect& box_j = detections[j].box;
+            const cv::Rect intersection = box_i & box_j;
+
+            if (intersection.width > 0 && intersection.height > 0)
+            {
+                const float intersection_area = static_cast<float>(intersection.area());
+                const float union_area = area_i + static_cast<float>(box_j.area()) - intersection_area;
+
+                if (intersection_area / union_area > nmsThreshold)
+                {
+                    suppress[j] = true;
+                }
+            }
+        }
+    }
+
+    detections = std::move(result);
+
+    auto t1 = std::chrono::steady_clock::now();
+    if (nmsTime)
+    {
+        *nmsTime = t1 - t0;
+    }
+}
+
+#ifdef USE_CUDA
+std::vector<Detection> postProcessYolo(
+    const float* output,
+    const std::vector<int64_t>& shape,
+    int numClasses,
+    float confThreshold,
+    float nmsThreshold,
+    std::chrono::duration<double, std::milli>* nmsTime
+)
+{
+    std::vector<Detection> detections;
+    detections.reserve(256);
+
+    if (shape.size() < 3) return detections;
+
+    int64_t rows = shape[1];
+    int64_t cols = shape[2];
+    const float img_scale = trt_detector.img_scale;
+
+    if (cols == 6)
+    {
+        int64_t numDetections = rows;
+        for (int i = 0; i < numDetections; ++i)
+        {
+            const float* det = output + i * cols;
+            float confidence = det[4];
+
+            if (confidence > confThreshold)
+            {
+                int classId = static_cast<int>(det[5]);
+
+                float cx = det[0];
+                float cy = det[1];
+                float dx = det[2];
+                float dy = det[3];
+
+                Detection detection;
+                detection.box.x = static_cast<int>(cx * img_scale);
+                detection.box.y = static_cast<int>(cy * img_scale);
+                detection.box.width = static_cast<int>((dx - cx) * img_scale);
+                detection.box.height = static_cast<int>((dy - cy) * img_scale);
+                detection.confidence = confidence;
+                detection.classId = classId;
+
+                detections.push_back(detection);
+            }
+        }
+    }
+    else
+    {
+        for (int i = 0; i < cols; ++i)
+        {
+            const float* col_data = output + i;
+
+            float cx = col_data[0 * cols];
+            float cy = col_data[1 * cols];
+            float ow = col_data[2 * cols];
+            float oh = col_data[3 * cols];
+
+            float maxScore = 0.0f;
+            int maxClassId = 0;
+            for (int c = 0; c < numClasses; ++c)
+            {
+                float score = col_data[(4 + c) * cols];
+                if (score > maxScore)
+                {
+                    maxScore = score;
+                    maxClassId = c;
+                }
+            }
+
+            if (maxScore > confThreshold)
+            {
+                const float half_ow = 0.5f * ow;
+                const float half_oh = 0.5f * oh;
+
+                Detection det;
+                det.box.x = static_cast<int>((cx - half_ow) * img_scale);
+                det.box.y = static_cast<int>((cy - half_oh) * img_scale);
+                det.box.width = static_cast<int>(ow * img_scale);
+                det.box.height = static_cast<int>(oh * img_scale);
+                det.confidence = maxScore;
+                det.classId = maxClassId;
+
+                detections.push_back(det);
+            }
+        }
+    }
+
+    NMS(detections, nmsThreshold, nmsTime);
+    return detections;
+}
+#endif
+
+std::vector<Detection> postProcessYoloDML(
+    const float* output,
+    const std::vector<int64_t>& shape,
+    int numClasses,
+    float confThreshold,
+    float nmsThreshold,
+    std::chrono::duration<double, std::milli>* nmsTime
+)
+{
+    std::vector<Detection> detections;
+    if (shape.size() != 2) return detections;
+
+    int64_t rows = shape[0];
+    int64_t cols = shape[1];
+
+    // YOLOv10 format: [N, 6] where each row is [x1,y1,x2,y2,conf,class]
+    if (cols == 6 && rows > cols)
+    {
+        int64_t numDetections = rows;
+        detections.reserve(numDetections);
+        for (int i = 0; i < numDetections; ++i)
+        {
+            const float* det = output + i * cols;
+            float confidence = det[4];
+            if (confidence > confThreshold)
+            {
+                int classId = static_cast<int>(det[5]);
+                float cx = det[0];
+                float cy = det[1];
+                float dx = det[2];
+                float dy = det[3];
+
+                cv::Rect box;
+                box.x = static_cast<int>(cx);
+                box.y = static_cast<int>(cy);
+                box.width = static_cast<int>(dx - cx);
+                box.height = static_cast<int>(dy - cy);
+                detections.push_back(Detection{ box, confidence, classId });
+            }
+        }
+        NMS(detections, nmsThreshold, nmsTime);
+        return detections;
+    }
+
+    // YOLOv5 row format: [N, 5+num_classes] where each row is [cx,cy,w,h,obj_conf,class_scores...]
+    if (rows > cols && cols >= 6)
+    {
+        int64_t numDetections = rows;
+        int nc = static_cast<int>(cols) - 5;
+        detections.reserve(256);
+        for (int i = 0; i < numDetections; ++i)
+        {
+            const float* det = output + i * cols;
+            float obj_conf = det[4];
+            if (obj_conf < confThreshold) continue;
+
+            // Find best class
+            float maxScore = 0.0f;
+            int maxClassId = 0;
+            for (int c = 0; c < nc; ++c)
+            {
+                float score = det[5 + c];
+                if (score > maxScore)
+                {
+                    maxScore = score;
+                    maxClassId = c;
+                }
+            }
+
+            float confidence = obj_conf * maxScore;
+            if (confidence > confThreshold)
+            {
+                float cx = det[0];
+                float cy = det[1];
+                float w = det[2];
+                float h = det[3];
+
+                cv::Rect box;
+                box.x = static_cast<int>(cx - w * 0.5f);
+                box.y = static_cast<int>(cy - h * 0.5f);
+                box.width = static_cast<int>(w);
+                box.height = static_cast<int>(h);
+                detections.push_back(Detection{ box, confidence, maxClassId });
+            }
+        }
+        NMS(detections, nmsThreshold, nmsTime);
+        return detections;
+    }
+
+    // YOLOv8 transposed format: [attributes, N] where rows=attributes, cols=N
+    cv::Mat det_output(rows, cols, CV_32F, (void*)output);
+    for (int i = 0; i < cols; ++i) {
+        cv::Mat classes_scores = det_output.col(i).rowRange(4, 4 + numClasses);
+        cv::Point class_id_point;
+        double score;
+        cv::minMaxLoc(classes_scores, nullptr, &score, nullptr, &class_id_point);
+        if (score > confThreshold) {
+            float cx = det_output.at<float>(0, i);
+            float cy = det_output.at<float>(1, i);
+            float ow = det_output.at<float>(2, i);
+            float oh = det_output.at<float>(3, i);
+            const float half_ow = 0.5f * ow;
+            const float half_oh = 0.5f * oh;
+            cv::Rect box;
+            box.x = static_cast<int>(cx - half_ow);
+            box.y = static_cast<int>(cy - half_oh);
+            box.width = static_cast<int>(ow);
+            box.height = static_cast<int>(oh);
+            detections.push_back(Detection{ box, static_cast<float>(score), class_id_point.y });
+        }
+    }
+    if (!detections.empty())
+    {
+        NMS(detections, nmsThreshold, nmsTime);
+    }
+    return detections;
+}
